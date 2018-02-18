@@ -2,15 +2,15 @@
 using ASP.NET.Core.Service.RabbitMQBus.EventBus;
 using ASP.NET.Core.Service.RabbitMQBus.EventBus.Abstractions;
 using ASP.NET.Core.Service.RabbitMQBus.EventBusRabbitMQ;
-using Autofac;
-using Autofac.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using System;
+using Swashbuckle.AspNetCore.Swagger;
+using System.IO;
 
 namespace ASP.NET.Core.Service
 {
@@ -38,7 +38,7 @@ namespace ASP.NET.Core.Service
         public IConfiguration Configuration { get; }
 
         // This method gets called by the runtime. Use this method to add services to the container.
-        public IServiceProvider ConfigureServices(IServiceCollection services)
+        public void ConfigureServices(IServiceCollection services)
         {
             services.AddMvc();
 
@@ -63,10 +63,21 @@ namespace ASP.NET.Core.Service
 
             RegisterEventBus(services);
 
-            var container = new ContainerBuilder();
-            container.Populate(services);
+            services.AddSwaggerGen(options =>
+            {
+                options.DescribeAllEnumsAsStrings();
+                options.SwaggerDoc("v1", new Info
+                {
+                    Title = "Service HTTP API",
+                    Version = "v1",
+                    Description = "The Service HTTP API",
+                    TermsOfService = "Terms Of Service"
+                });
 
-            return new AutofacServiceProvider(container.Build());
+                //var basePath = AppContext.BaseDirectory;
+                //var xmlPath = Path.Combine(basePath, "ASP.NET.Core.Service.xml");
+                //options.IncludeXmlComments(xmlPath);
+            });
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -94,6 +105,14 @@ namespace ASP.NET.Core.Service
                     template: "{controller=Home}/{action=Index}/{id?}");
             });
 
+            app.UseSwagger();
+
+            //// Enable middleware to serve swagger-ui (HTML, JS, CSS, etc.), specifying the Swagger JSON endpoint.
+            app.UseSwaggerUI(c =>
+            {
+                c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
+            });
+
             ConfigureEventBus(app);
         }
 
@@ -101,28 +120,29 @@ namespace ASP.NET.Core.Service
         {
             var subscriptionClientName = "Teszt MQ";
 
+            services.AddSingleton<IEventBusSubscriptionsManager, InMemoryEventBusSubscriptionsManager>();
+            services.AddScoped<NinjaKilledChangedEventHandler>();
+
+
 
             services.AddSingleton<IEventBus, EventBusRabbitMQ>(sp =>
             {
                 var rabbitMQPersistentConnection = sp.GetRequiredService<IRabbitMQPersistentConnection>();
-                var iLifetimeScope = sp.GetRequiredService<ILifetimeScope>();
+                var serviceProvider = services.BuildServiceProvider();
                 var logger = sp.GetRequiredService<ILogger<EventBusRabbitMQ>>();
                 var eventBusSubcriptionsManager = sp.GetRequiredService<IEventBusSubscriptionsManager>();
 
                 var retryCount = 5;
 
-                return new EventBusRabbitMQ(rabbitMQPersistentConnection, logger, iLifetimeScope, eventBusSubcriptionsManager, subscriptionClientName, retryCount);
+                return new EventBusRabbitMQ(rabbitMQPersistentConnection, logger, serviceProvider, eventBusSubcriptionsManager, subscriptionClientName, retryCount);
             });
-
-
-            services.AddSingleton<IEventBusSubscriptionsManager, InMemoryEventBusSubscriptionsManager>();
-            services.AddTransient<NinjaKilledChangedEventHandler>();
         }
 
         private void ConfigureEventBus(IApplicationBuilder app)
         {
             var eventBus = app.ApplicationServices.GetRequiredService<IEventBus>();
 
+            //feliratkozása a csatorna hallgatására 
             eventBus.Subscribe<NinjaKilledChangedEvent, NinjaKilledChangedEventHandler>();
         }
     }

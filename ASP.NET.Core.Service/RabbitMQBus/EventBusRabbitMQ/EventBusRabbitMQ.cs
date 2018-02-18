@@ -1,7 +1,8 @@
-﻿using ASP.NET.Core.Service.RabbitMQBus.EventBus;
+﻿using ASP.NET.Core.Service.RabbitMQBus.CustomEvent;
+using ASP.NET.Core.Service.RabbitMQBus.EventBus;
 using ASP.NET.Core.Service.RabbitMQBus.EventBus.Abstractions;
 using ASP.NET.Core.Service.RabbitMQBus.EventBus.Events;
-using Autofac;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Polly;
@@ -13,6 +14,7 @@ using System;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
+using static ASP.NET.Core.Service.Startup;
 
 namespace ASP.NET.Core.Service.RabbitMQBus.EventBusRabbitMQ
 {
@@ -23,22 +25,21 @@ namespace ASP.NET.Core.Service.RabbitMQBus.EventBusRabbitMQ
         private readonly IRabbitMQPersistentConnection _persistentConnection;
         private readonly ILogger<EventBusRabbitMQ> _logger;
         private readonly IEventBusSubscriptionsManager _subsManager;
-        private readonly ILifetimeScope _autofac;
-        private readonly string AUTOFAC_SCOPE_NAME = "service_event_bus";
+        private readonly IServiceProvider _serviceProvider;
         private readonly int _retryCount;
 
         private IModel _consumerChannel;
         private string _queueName;
 
         public EventBusRabbitMQ(IRabbitMQPersistentConnection persistentConnection, ILogger<EventBusRabbitMQ> logger,
-            ILifetimeScope autofac, IEventBusSubscriptionsManager subsManager, string queueName = null, int retryCount = 5)
+            IServiceProvider serviceProvider, IEventBusSubscriptionsManager subsManager, string queueName = null, int retryCount = 5)
         {
             _persistentConnection = persistentConnection ?? throw new ArgumentNullException(nameof(persistentConnection));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _subsManager = subsManager ?? new InMemoryEventBusSubscriptionsManager();
             _queueName = queueName;
             _consumerChannel = CreateConsumerChannel();
-            _autofac = autofac;
+            _serviceProvider = serviceProvider;
             _retryCount = retryCount;
             _subsManager.OnEventRemoved += SubsManager_OnEventRemoved;
         }
@@ -99,9 +100,7 @@ namespace ASP.NET.Core.Service.RabbitMQBus.EventBusRabbitMQ
             }
         }
 
-        public void Subscribe<T, TH>()
-            where T : IntegrationEvent
-            where TH : IIntegrationEventHandler<T>
+        public void Subscribe<T, TH>() where T : IntegrationEvent where TH : IIntegrationEventHandler<T>
         {
             var eventName = _subsManager.GetEventKey<T>();
             DoInternalSubscription(eventName);
@@ -111,27 +110,19 @@ namespace ASP.NET.Core.Service.RabbitMQBus.EventBusRabbitMQ
         private void DoInternalSubscription(string eventName)
         {
             var containsKey = _subsManager.HasSubscriptionsForEvent(eventName);
-            if (!containsKey)
+            if (containsKey) return;
+
+            if (!_persistentConnection.IsConnected)
             {
-                if (!_persistentConnection.IsConnected)
-                {
-                    _persistentConnection.TryConnect();
-                }
-
-                using (var channel = _persistentConnection.CreateModel())
-                {
-                    channel.QueueBind(queue: _queueName,
-                                      exchange: BROKER_NAME,
-                                      routingKey: eventName);
-                }
+                _persistentConnection.TryConnect();
             }
-        }
 
-        public void Unsubscribe<T, TH>()
-            where TH : IIntegrationEventHandler<T>
-            where T : IntegrationEvent
-        {
-            _subsManager.RemoveSubscription<T, TH>();
+            using (var channel = _persistentConnection.CreateModel())
+            {
+                channel.QueueBind(queue: _queueName,
+                                  exchange: BROKER_NAME,
+                                  routingKey: eventName);
+            }
         }
 
         public void Dispose()
@@ -187,23 +178,20 @@ namespace ASP.NET.Core.Service.RabbitMQBus.EventBusRabbitMQ
 
         private async Task ProcessEvent(string eventName, string message)
         {
-            if (_subsManager.HasSubscriptionsForEvent(eventName))
+            if (!_subsManager.HasSubscriptionsForEvent(eventName)) return;
+
+
+            var subscriptions = _subsManager.GetHandlersForEvent(eventName);
+            foreach (var subscription in subscriptions)
             {
-                using (var scope = _autofac.BeginLifetimeScope(AUTOFAC_SCOPE_NAME))
-                {
-                    var subscriptions = _subsManager.GetHandlersForEvent(eventName);
-                    foreach (var subscription in subscriptions)
-                    {
-                        var eventType = _subsManager.GetEventTypeByName(eventName);
-                        var integrationEvent = JsonConvert.DeserializeObject(message, eventType);
+                var eventType = _subsManager.GetEventTypeByName(eventName);
+                var integrationEvent = JsonConvert.DeserializeObject(message, eventType);
 
+                var handler = _serviceProvider.GetService(subscription.HandlerType);
 
-                        var handler = scope.ResolveOptional(subscription.HandlerType);
-                        var concreteType = typeof(IIntegrationEventHandler<>).MakeGenericType(eventType);
-                        await (Task)concreteType.GetMethod("Handle").Invoke(handler, new object[] { integrationEvent });
+                var concreteType = typeof(IIntegrationEventHandler<>).MakeGenericType(eventType);
+                await (Task)concreteType.GetMethod("Handle").Invoke(handler, new object[] { integrationEvent });
 
-                    }
-                }
             }
         }
     }

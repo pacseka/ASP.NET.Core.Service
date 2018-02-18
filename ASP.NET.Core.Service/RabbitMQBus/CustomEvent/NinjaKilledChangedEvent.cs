@@ -12,7 +12,7 @@ namespace ASP.NET.Core.Service.RabbitMQBus.CustomEvent
 
         public int NewKilled { get; private set; }
 
-        public decimal OldKilled { get; private set; }
+        public int OldKilled { get; private set; }
 
         public NinjaKilledChangedEvent(int ninjaId, int newKilled, int oldKilled)
         {
